@@ -1,0 +1,173 @@
+import os
+import email
+from email import policy
+import openpyxl
+from openpyxl import load_workbook
+import pandas as pd
+from bs4 import BeautifulSoup
+import tempfile
+import shutil  # For copying files
+ 
+def extract_email_content_from_file(email_file_path):
+    """
+    Extracts the subject and body from a saved email file (.eml).
+ 
+    Args:
+        email_file_path: Path to the .eml file.
+ 
+    Returns:
+        A dictionary containing the email subject and body.
+    """
+    try:
+        with open(email_file_path, 'rb') as f:
+            msg = email.message_from_binary_file(f, policy=policy.default)
+ 
+        subject = msg.get('Subject')
+        body = ""
+ 
+        if msg.is_multipart():
+            for part in msg.walk():
+                content_type = part.get_content_type()
+                content_disposition = str(part.get('Content-Disposition'))
+ 
+                if content_type == "text/plain" and "attachment" not in content_disposition:
+                    body = part.get_payload(decode=True).decode()
+                    break  # Prioritize plain text
+                elif content_type == "text/html" and "attachment" not in content_disposition and not body:
+                    html_body = part.get_payload(decode=True).decode()
+                    soup = BeautifulSoup(html_body, 'html.parser')
+                    body = soup.get_text(separator="\n")
+        else:
+            body = msg.get_payload(decode=True).decode()
+ 
+        return {"subject": subject, "body": body}
+ 
+    except Exception as e:
+        print(f"Error processing email file: {email_file_path} - {e}")
+        return {"subject": None, "body": None}
+ 
+def find_excel_attachment(email_file_path):
+    """
+    Finds the Excel attachment path within an email file.
+ 
+    Args:
+        email_file_path: Path to the .eml file.
+ 
+    Returns:
+        The path to the extracted Excel file, or None if not found.
+    """
+    try:
+        with open(email_file_path, 'rb') as f:
+            msg = email.message_from_binary_file(f, policy=policy.default)
+ 
+        for part in msg.walk():
+            content_type = part.get_content_type()
+            content_disposition = str(part.get('Content-Disposition'))
+if content_type in ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.ms-excel"] and "attachment" in content_disposition:
+                filename = part.get_filename()
+                if filename:
+                    # Create a temporary directory to save the attachment
+                    temp_dir = tempfile.mkdtemp()
+                    attachment_path = os.path.join(temp_dir, filename)
+                    with open(attachment_path, 'wb') as attachment_file:
+                        attachment_file.write(part.get_payload(decode=True))
+                    return attachment_path
+        return None
+ 
+    except Exception as e:
+        print(f"Error finding Excel attachment in: {email_file_path} - {e}")
+        return None
+ 
+def compare_large_excel_files(file1_path, file2_path, chunksize=100000):
+    """
+    Compares two large Excel files efficiently using pandas.
+ 
+    Args:
+        file1_path: Path to the first Excel file.
+        file2_path: Path to the second Excel file.
+        chunksize: Number of rows to read and compare at a time.
+ 
+    Returns:
+        A dictionary containing the comparison results.
+    """
+ 
+    results = {"files_equal": True, "data_differences": 0}
+ 
+    try:
+        reader1 = pd.read_excel(file1_path, chunksize=chunksize)
+        reader2 = pd.read_excel(file2_path, chunksize=chunksize)
+ 
+        chunk_iter1 = iter(reader1)
+        chunk_iter2 = iter(reader2)
+ 
+        while True:
+            try:
+                chunk1 = next(chunk_iter1)
+                chunk2 = next(chunk_iter2)
+            except StopIteration:
+                break  # Reached end of one or both files
+ 
+            if not chunk1.equals(chunk2):
+                results["files_equal"] = False
+                results["data_differences"] += (chunk1 != chunk2).sum().sum()  # Count different cells
+ 
+    except FileNotFoundError as e:
+        results["files_equal"] = False
+        results["error"] = str(e)
+        return results
+    except ValueError as e:
+        results["files_equal"] = False
+        results["error"] = f"ValueError during comparison: {e}. Ensure both Excel files have the same structure (same columns and data types)."
+        return results
+ 
+    if results["files_equal"]:
+        results["message"] = "Excel files are identical."
+    else:
+        results["message"] = f"Excel files are different. Total different cells: {results['data_differences']}"
+ 
+    return results
+ 
+def main(email_folder1, email_folder2):
+    """
+    Main function to compare emails and Excel attachments from two folders.
+ 
+    Args:
+        email_folder1: Path to the folder containing the first email.
+        email_folder2: Path to the folder containing the second email.
+    """
+ 
+    # Get email file paths (assuming only one .eml file per folder)
+    email_file1 = os.path.join(email_folder1, [f for f in os.listdir(email_folder1) if f.endswith(".eml")][0])
+    email_file2 = os.path.join(email_folder2, [f for f in os.listdir(email_folder2) if f.endswith(".eml")][0])
+ 
+    # Extract email content
+    email1_content = extract_email_content_from_file(email_file1)
+    email2_content = extract_email_content_from_file(email_file2)
+ 
+    # Compare email content
+    email_subject_equal = email1_content["subject"] == email2_content["subject"]
+    email_body_equal = (email1_content["body"] or "").strip() == (email2_content["body"] or "").strip()  # Handle potential None body
+ 
+    print("Email Subject Equal:", email_subject_equal)
+    print("Email Body Equal:", email_body_equal)
+ 
+    # Find and compare Excel attachments
+    excel_file1 = find_excel_attachment(email_file1)
+    excel_file2 = find_excel_attachment(email_file2)
+ 
+    if excel_file1 and excel_file2:
+        excel_comparison_results = compare_large_excel_files(excel_file1, excel_file2)
+        print("Excel Comparison Results:", excel_comparison_results)
+ 
+        # Clean up temporary directories and files
+        shutil.rmtree(os.path.dirname(excel_file1), ignore_errors=True)
+        shutil.rmtree(os.path.dirname(excel_file2), ignore_errors=True)
+    else:
+        print("Could not find Excel attachments in one or both emails.")
+ 
+if __name__ == "__main__":
+    # **CONFIGURE THESE VARIABLES**
+    email_folder1 = "before"  # Folder with the first email (.eml)
+    email_folder2 = "after"  # Folder with the second email (.eml)
+ 
+    main(email_folder1, email_folder2)
